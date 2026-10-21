@@ -320,19 +320,42 @@ def import_pack(
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _pack_skill_where(pack: str | None = None) -> tuple[str, list[Any]]:
+    """Predicate for active, manageable pack skills, shared by ls and rm.
+
+    Unsealed skill rows only: kind is 'skill', deleted_at is null, and an
+    owner's seal or origin is never cleared by pack operations (INV-03, INV-08).
+    When pack is specified, matches that pack's project and slug prefix.
+    When omitted, matches any pack project and its corresponding slug prefix.
+    """
+    base = (
+        "kind = 'skill' AND origin <> 'owner' AND owner_seal = 0 AND deleted_at IS NULL"
+    )
+    if pack is not None:
+        prefix = f"pack-{pack}-"
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        return f"{base} AND project = ? AND slug LIKE ? ESCAPE '\\'", [f"pack:{pack}", escaped]
+    slug_match = (
+        "slug LIKE ('pack-' || replace(replace(replace(substr(project, 6), "
+        "'\\', '\\\\'), '%', '\\%'), '_', '\\_') || '-%') ESCAPE '\\'"
+    )
+    return f"{base} AND project LIKE 'pack:%' AND {slug_match}", []
+
+
 def list_packs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Installed packs with how their skills are holding up.
 
     ``confirmed`` and ``failures`` are the point of the exercise: after a
     couple of weeks they say which downloaded pack actually earned its place.
     """
+    where, params = _pack_skill_where()
     rows = conn.execute(
         "SELECT project, COUNT(*) AS skills, AVG(strength) AS avg_strength, "
         "SUM(confirmed_count) AS confirmed, SUM(failure_count) AS failures, "
         "SUM(CASE WHEN lifecycle = 'archived' THEN 1 ELSE 0 END) AS archived "
-        "FROM memory_items WHERE kind = 'skill' AND deleted_at IS NULL "
-        "AND project LIKE 'pack:%' GROUP BY project ORDER BY project",
-        (),
+        f"FROM memory_items WHERE {where} "
+        "GROUP BY project ORDER BY project",
+        params,
     ).fetchall()
     return [{
         "pack": r["project"].split(":", 1)[1],
@@ -353,14 +376,12 @@ def remove_pack(conn: sqlite3.Connection, pack: str, *, reason: str) -> list[str
     stays. The slug survives every edit channel; ``agent`` does not (MCP
     rewrites it), so it is not the key.
     """
-    prefix = f"pack-{pack}-"
+    where, params = _pack_skill_where(pack)
     # the selection and the deletes in one transaction: an approval landing
     # between them is honoured
     with S.tx(conn):
         rows = conn.execute(
-            "SELECT slug FROM memory_items WHERE project = ? AND slug LIKE ? ESCAPE '\\' "
-            # owner_seal, not origin alone: origin and project are an agent's to relabel
-            "AND origin <> 'owner' AND owner_seal = 0 AND deleted_at IS NULL",
-            (f"pack:{pack}", prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"),
+            f"SELECT slug FROM memory_items WHERE {where}",
+            params,
         ).fetchall()
         return [r["slug"] for r in rows if S.soft_delete(conn, r["slug"], reason)]
