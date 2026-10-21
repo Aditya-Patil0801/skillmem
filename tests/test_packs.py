@@ -174,3 +174,72 @@ def test_remove_pack_keeps_an_owner_note_even_when_it_copies_the_pack_naming(con
     removed = P.remove_pack(conn, "somepack", reason="test")
     assert "pack-somepack-mine" not in removed and len(removed) == 2
     assert S.get(conn, "pack-somepack-mine").deleted_at is None
+
+
+def test_remove_pack_does_not_delete_notes_or_prompts(conn):
+    """remove_pack only deletes skills (kind='skill'), not notes or prompts."""
+    S.upsert(conn, S.MemoryItem(slug="pack-mypack-cheat", kind="note", title="Notes",
+                                body="Cheat sheet", project="pack:mypack", origin="agent"))
+    S.upsert(conn, S.MemoryItem(slug="pack-mypack-prompt", kind="prompt", title="Runbook",
+                                body="Prompt steps", project="pack:mypack", origin="agent"))
+    S.upsert(conn, S.MemoryItem(slug="pack-mypack-deploy", kind="skill", title="Deploy",
+                                body="Deploy steps", project="pack:mypack", origin="imported"))
+
+    removed = P.remove_pack(conn, "mypack", reason="test")
+    assert removed == ["pack-mypack-deploy"]
+    assert S.get(conn, "pack-mypack-cheat") is not None
+    assert S.get(conn, "pack-mypack-prompt") is not None
+    assert S.get(conn, "pack-mypack-deploy") is None
+
+
+def test_list_packs_ignores_unprefixed_slugs(conn):
+    """list_packs ignores skills under pack:<name> that lack the pack-<name>- slug prefix."""
+    S.upsert(conn, S.MemoryItem(slug="my-custom-skill", kind="skill", title="Custom",
+                                body="Custom body", project="pack:mypack", origin="imported"))
+    S.upsert(conn, S.MemoryItem(slug="pack-otherpack-helper", kind="skill", title="Helper",
+                                body="Helper body", project="pack:mypack", origin="imported"))
+    S.upsert(conn, S.MemoryItem(slug="pack-mypack-valid", kind="skill", title="Valid",
+                                body="Valid body", project="pack:mypack", origin="imported"))
+
+    listed = {p["pack"]: p for p in P.list_packs(conn)}
+    assert "mypack" in listed
+    assert listed["mypack"]["skills"] == 1
+
+
+def test_list_and_remove_pack_consistency_with_sealed_skills(conn, at_terminal):
+    """Owner-sealed skills remain protected and do not leave zombie entries in list_packs."""
+    S.upsert(conn, S.MemoryItem(slug="pack-mypack-unsealed", kind="skill", title="Unsealed",
+                                body="Body", project="pack:mypack", origin="imported"))
+    S.upsert(conn, S.MemoryItem(slug="pack-mypack-approved", kind="skill", title="Approved",
+                                body="Body", project="pack:mypack", origin="imported"))
+    S.set_trust(conn, "pack-mypack-approved", trusted=True)
+
+    listed = {p["pack"]: p for p in P.list_packs(conn)}
+    assert listed["mypack"]["skills"] == 1
+
+    removed = P.remove_pack(conn, "mypack", reason="test")
+    assert removed == ["pack-mypack-unsealed"]
+    assert S.get(conn, "pack-mypack-approved") is not None
+    assert S.get(conn, "pack-mypack-unsealed") is None
+
+    assert P.list_packs(conn) == []
+
+
+def test_list_and_remove_pack_with_special_characters_in_name(conn):
+    """Packs with underscores or percent signs match strictly and do not collide."""
+    S.upsert(conn, S.MemoryItem(slug="pack-my_pack-skill", kind="skill", title="S1",
+                                body="B1", project="pack:my_pack", origin="imported"))
+    S.upsert(conn, S.MemoryItem(slug="pack-my-pack-skill", kind="skill", title="S2",
+                                body="B2", project="pack:my-pack", origin="imported"))
+    S.upsert(conn, S.MemoryItem(slug="pack-pack%1-skill", kind="skill", title="S3",
+                                body="B3", project="pack:pack%1", origin="imported"))
+
+    listed = {p["pack"]: p["skills"] for p in P.list_packs(conn)}
+    assert listed["my_pack"] == 1
+    assert listed["my-pack"] == 1
+    assert listed["pack%1"] == 1
+
+    removed = P.remove_pack(conn, "my_pack", reason="test")
+    assert removed == ["pack-my_pack-skill"]
+    assert S.get(conn, "pack-my-pack-skill") is not None
+    assert S.get(conn, "pack-pack%1-skill") is not None
